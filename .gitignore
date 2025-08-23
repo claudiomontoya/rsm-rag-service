@@ -1,0 +1,59 @@
+# Entornos virtuales
+venv/
+.env
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Archivos de configuración locales
+*.env
+.env.local
+.env.*.local
+
+# Compilados y caches
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.manifest
+*.spec
+
+# Logs y data temporal
+*.log
+logs/
+tmp/
+temp/
+*.pid
+*.seed
+*.db
+
+# Configuración de IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Datos generados por RAG
+vector_index/
+data/
+chunks/
+uploads/
+
+# Docker / Compose
+*.pid
+*.sock
+*.db
+docker-compose.override.yml
+
+# Qdrant y Redis (si están locales)
+qdrant_storage/
+redis_data/
+
+# Otros
+.DS_Store
+Thumbs.db
