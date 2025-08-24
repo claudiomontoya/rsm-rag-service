@@ -3,58 +3,165 @@ from typing import Dict, Any, Optional
 from app.retrieval.dense_retriever import DenseRetriever
 from app.retrieval.bm25_retriever import BM25Retriever
 from app.retrieval.hybrid_retriever import HybridRetriever
+from app.retrieval.rerank_wrapper import create_rerank_retriever
+from app.obs.decorators import traced, timed
+from app.obs.langfuse import trace_with_langfuse, log_retrieval
+from app.obs.logging_setup import get_logger
+from app.obs.metrics import inc_counter, record_duration
+from app.config import RERANK_ENABLED
+
+logger = get_logger(__name__)
 
 class RetrieverFactory:
-    """Factory for creating different retriever types."""
+    """Factory for creating different retriever types with observability."""
     
     @staticmethod
+    @traced(operation_name="create_retriever")
     def create_retriever(retriever_type: str = "dense"):
-        """Create retriever by type."""
+        """Create retriever by type with optional reranking."""
         retriever_type = retriever_type.lower()
         
+        logger.info(f"Creating retriever", retriever_type=retriever_type)
+        
+        # Create base retriever
         if retriever_type == "dense":
-            return DenseRetriever()
+            base_retriever = DenseRetriever()
         elif retriever_type == "bm25":
-            return BM25Retriever()
+            base_retriever = BM25Retriever()
         elif retriever_type == "hybrid":
-            return HybridRetriever()
+            base_retriever = HybridRetriever()
+        elif retriever_type.endswith("_rerank"):
+            # Handle explicit rerank request
+            base_type = retriever_type.replace("_rerank", "")
+            base_retriever = RetrieverFactory.create_retriever(base_type)
+            return create_rerank_retriever(base_retriever, enabled=True)
         else:
+            logger.error(f"Unknown retriever type", retriever_type=retriever_type)
             raise ValueError(f"Unknown retriever type: {retriever_type}")
+        
+        # Optionally wrap with reranking
+        if RERANK_ENABLED and not retriever_type.endswith("_rerank"):
+            logger.info("Wrapping retriever with reranking", base_type=retriever_type)
+            return create_rerank_retriever(base_retriever, enabled=True)
+        
+        return base_retriever
 
+@traced(operation_name="generate_answer", include_args=True)
 def _generate_answer(question: str, sources: list, retriever_name: str) -> str:
-    """Generate answer based on sources (enhanced from v0.1)."""
-    if not sources:
-        return "I couldn't find relevant information to answer your question."
+    """Generate answer based on sources with observability."""
     
-    # Simple answer generation (will be enhanced with LLM in v0.3)
+    logger.info(f"Generating answer", 
+               question=question,
+               sources_count=len(sources),
+               retriever=retriever_name)
+    
+    if not sources:
+        answer = "I couldn't find relevant information to answer your question."
+        logger.warning("No sources available for answer generation")
+        return answer
+    
+    # Enhanced answer generation with source analysis
     context_parts = []
+    total_score = 0
+    
     for i, source in enumerate(sources[:3], 1):
         text_preview = source["text"][:200] + "..." if len(source["text"]) > 200 else source["text"]
-        score_info = f" (score: {source.get('score', 0):.2f})" if source.get('score') else ""
+        score = source.get("score", 0)
+        total_score += score
+        
+        score_info = f" (score: {score:.3f})" if score else ""
         context_parts.append(f"[{i}] {text_preview}{score_info}")
     
     context = " ".join(context_parts)
+    avg_score = total_score / len(sources) if sources else 0
     
-    return f"Based on the retrieved information using {retriever_name} search:\n\n{context}\n\nTo answer your question '{question}': {context[:300]}..."
+    # Generate comprehensive answer
+    answer = f"""Based on {len(sources)} sources using {retriever_name} search (avg relevance: {avg_score:.3f}):
 
+{context}
+
+To answer your question '{question}': {context[:400]}..."""
+    
+    logger.info(f"Answer generated", 
+               answer_length=len(answer),
+               avg_source_score=avg_score)
+    
+    return answer
+
+@traced(operation_name="query_documents", langfuse_trace=True)
+@timed("query_duration_ms")
 async def query_documents(question: str, retriever_type: str = "dense", top_k: int = 5) -> Dict[str, Any]:
-    """Query documents using specified retriever."""
-    try:
-        retriever = RetrieverFactory.create_retriever(retriever_type)
-        results = await retriever.search(question, top_k=top_k)
+    """Query documents with comprehensive observability."""
+    
+    logger.info(f"Processing query", 
+               question=question,
+               retriever_type=retriever_type,
+               top_k=top_k)
+    
+    with trace_with_langfuse("document_query", {
+        "question": question,
+        "retriever_type": retriever_type,
+        "top_k": top_k
+    }) as lf_ctx:
         
-        # Generate answer
-        answer = _generate_answer(question, results, retriever.name)
-        
-        return {
-            "answer": answer,
-            "sources": results,
-            "retriever_used": retriever.name,
-            "metadata": {
-                "total_sources": len(results),
-                "query_method": retriever_type
+        try:
+            # Create retriever
+            retriever = RetrieverFactory.create_retriever(retriever_type)
+            
+            # Perform search
+            logger.info(f"Searching with {retriever.name}")
+            results = await retriever.search(question, top_k=top_k)
+            
+            # Log retrieval to Langfuse
+            if lf_ctx and lf_ctx.get("trace"):
+                log_retrieval(lf_ctx["trace"], question, results, retriever.name)
+            
+            # Generate answer
+            answer = _generate_answer(question, results, retriever.name)
+            
+            # Record metrics
+            inc_counter("queries_processed", {"retriever": retriever.name})
+            inc_counter("documents_retrieved", value=len(results))
+            
+            response = {
+                "answer": answer,
+                "sources": results,
+                "retriever_used": retriever.name,
+                "metadata": {
+                    "total_sources": len(results),
+                    "query_method": retriever_type,
+                    "avg_score": sum(r.get("score", 0) for r in results) / len(results) if results else 0
+                }
             }
-        }
-        
-    except Exception as e:
-        raise Exception(f"Query failed: {str(e)}")
+            
+            logger.info(f"Query completed successfully", 
+                       retriever=retriever.name,
+                       sources_found=len(results))
+            
+            # Log to Langfuse
+            if lf_ctx and lf_ctx.get("trace"):
+                lf_ctx["trace"].update(output={
+                    "answer_preview": answer[:100],
+                    "sources_count": len(results)
+                })
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Query failed", 
+                        question=question,
+                        retriever_type=retriever_type,
+                        error=str(e),
+                        exc_info=True)
+            
+            # Record error metrics
+            inc_counter("queries_failed", {"retriever": retriever_type})
+            
+            # Log to Langfuse
+            if lf_ctx and lf_ctx.get("trace"):
+                lf_ctx["trace"].update(output={
+                    "status": "error",
+                    "error": str(e)
+                })
+            
+            raise Exception(f"Query failed: {str(e)}")
