@@ -1,53 +1,122 @@
 from __future__ import annotations
-import httpx
-from fastapi import APIRouter, HTTPException
-from app.models.schemas import IngestRequest, IngestResponse
-from app.utils.split import strip_html, strip_markdown, simple_word_split
-from app.deps.embeddings import embed_texts, embedding_dimension
-from app.store.qdrant_store import ensure_collection, add_documents
+import asyncio
+from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse
+from app.models.schemas import IngestRequest, IngestResponse, JobStatusResponse
+from app.services.ingest_service import start_ingest_job
+from app.services.job_manager import job_registry
+from app.utils.sse import create_sse_message, create_sse_heartbeat, create_sse_close
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
-async def _fetch_content(content: str, document_type: str) -> str:
-    """Fetch and clean content based on type."""
-    
-    if content.startswith(("http://", "https://")):
-        async with httpx.AsyncClient() as client:
-            response = await client.get(content)
-            response.raise_for_status()
-            raw_content = response.text
-    else:
-        raw_content = content
-    
-    if document_type == "html":
-        return strip_html(raw_content)
-    elif document_type == "markdown":
-        return strip_markdown(raw_content)
-    else:
-        return raw_content
-
 @router.post("", response_model=IngestResponse)
 async def ingest_document(request: IngestRequest) -> IngestResponse:
-    """Ingest a document into the vector store."""
+    """Start document ingestion job."""
     try:
-        cleaned_content = await _fetch_content(request.content, request.document_type)
-        chunks = simple_word_split(cleaned_content)
-        if not chunks or not chunks[0].strip():
-            return IngestResponse(
-                status="error",
-                message="No content to ingest",
-                chunks_created=0
-            )
-        embeddings = embed_texts(chunks)
-        ensure_collection(embedding_dimension())        
-        chunks_created = add_documents(chunks, embeddings)       
+        job_id = await start_ingest_job(request.content, request.document_type)
+        
         return IngestResponse(
             status="success",
-            message=f"Successfully ingested {chunks_created} chunks",
-            chunks_created=chunks_created
+            message="Ingestion job started",
+            job_id=job_id,
+            chunks_created=0
         )
         
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=400, detail=f"Failed to fetch content: {str(e)}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to start ingestion: {str(e)}")
+
+@router.post("/file", response_model=IngestResponse)
+async def ingest_file(file: UploadFile = File(...)) -> IngestResponse:
+    """Ingest document from uploaded file."""
+    try:
+        content = (await file.read()).decode("utf-8", errors="ignore")
+        job_id = await start_ingest_job(content, "text")
+        
+        return IngestResponse(
+            status="success", 
+            message=f"File '{file.filename}' ingestion started",
+            job_id=job_id,
+            chunks_created=0
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
+
+@router.get("/{job_id}/status", response_model=JobStatusResponse)
+async def get_job_status(job_id: str) -> JobStatusResponse:
+    """Get job status."""
+    job = job_registry.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return JobStatusResponse(
+        job_id=job.job_id,
+        status=job.status,
+        stage=job.stage,
+        progress=job.progress,
+        message=job.message,
+        chunks_created=job.chunks_created,
+        created_at=job.created_at,
+        updated_at=job.updated_at
+    )
+
+@router.get("/{job_id}/stream")
+async def stream_job_progress(job_id: str):
+    """Stream job progress via Server-Sent Events."""
+    job = job_registry.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    event_queue = job_registry.get_event_stream(job_id)
+    if not event_queue:
+        raise HTTPException(status_code=404, detail="Event stream not found")
+    
+    async def event_generator():
+        """Generate SSE events."""
+        try:
+            # Send initial job state
+            initial_event = {
+                "type": "job_status",
+                "job_id": job.job_id,
+                "status": job.status,
+                "stage": job.stage,
+                "progress": job.progress,
+                "message": job.message,
+                "chunks_created": job.chunks_created
+            }
+            yield create_sse_message(initial_event)
+            
+            # Stream events until job is complete
+            while True:
+                try:
+                    # Wait for event with timeout for heartbeat
+                    event = await asyncio.wait_for(event_queue.get(), timeout=30.0)
+                    yield create_sse_message(event)
+                    
+                    # Check if job is finished
+                    if event.get("type") == "job_updated" and event.get("status") in ["success", "error"]:
+                        break
+                        
+                except asyncio.TimeoutError:
+                    # Send heartbeat
+                    yield create_sse_heartbeat()
+                    continue
+                    
+        except Exception as e:
+            error_event = {
+                "type": "error",
+                "message": f"Stream error: {str(e)}"
+            }
+            yield create_sse_message(error_event)
+        finally:
+            yield create_sse_close()
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
