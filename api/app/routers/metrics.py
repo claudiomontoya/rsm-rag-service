@@ -1,9 +1,10 @@
 from __future__ import annotations
+from datetime import time
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from app.obs.metrics import metrics_registry
 from app.obs.logging_setup import get_logger
-
+from app.services.query_cache import query_cache
 logger = get_logger(__name__)
 
 router = APIRouter(tags=["metrics"])
@@ -62,3 +63,20 @@ async def metrics_health() -> JSONResponse:
             {"status": "unhealthy", "error": str(e)},
             status_code=500
         )
+@router.get("/metrics/cache")
+async def get_cache_stats() -> JSONResponse:
+    """Get query cache statistics."""
+    try:
+        cache_stats = query_cache.get_stats()
+        
+        return JSONResponse({
+            "query_cache": cache_stats,
+            "timestamp": time.time()
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to get cache stats: {e}")
+        return JSONResponse(
+            {"error": "Failed to get cache stats", "detail": str(e)}, 
+            status_code=500
+        )        

@@ -13,6 +13,7 @@ from app.obs.decorators import traced, timed
 from app.obs.langfuse import trace_with_langfuse
 from app.obs.logging_setup import get_logger
 from app.obs.prometheus_metrics import prometheus_metrics
+from app.utils.pdf_extractor import pdf_extractor
 
 logger = get_logger(__name__)
 
@@ -25,24 +26,45 @@ async def _fetch_content(content: str, document_type: str) -> str:
     """Fetch and clean content with retry logic."""
     try:
         if content.startswith(("http://", "https://")):
-            logger.info(f"Fetching content from URL", url=content)
+            logger.info(f"Fetching content from URL", url=content, document_type=document_type)
             
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(30.0),
-                follow_redirects=True,
-                limits=httpx.Limits(max_connections=10)
-            ) as client:
-                response = await client.get(content)
-                response.raise_for_status()
-                raw_content = response.text
+            # Special handling for PDF
+            if document_type == "pdf":
+                raw_content = await pdf_extractor.fetch_and_extract(content)
+            else:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(30.0),
+                    follow_redirects=True,
+                    limits=httpx.Limits(max_connections=10)
+                ) as client:
+                    response = await client.get(content)
+                    response.raise_for_status()
+                    raw_content = response.text
                 
             logger.info(f"Successfully fetched content", 
                        url=content, 
                        content_length=len(raw_content),
-                       status_code=response.status_code)
+                       document_type=document_type)
         else:
-            raw_content = content
-            logger.info(f"Using provided content", content_length=len(raw_content))
+            # Direct content
+            if document_type == "pdf":
+                # Assume base64 encoded PDF content
+                import base64
+                try:
+                    pdf_bytes = base64.b64decode(content)
+                    raw_content = pdf_extractor.extract_from_bytes(pdf_bytes)
+                except Exception as e:
+                    raise ValueError(f"Invalid PDF content: {str(e)}")
+            else:
+                raw_content = content
+                
+            logger.info(f"Using provided content", 
+                       content_length=len(raw_content),
+                       document_type=document_type)
+        
+        # Validate PDF content
+        if document_type == "pdf":
+            raw_content = pdf_extractor.validate_pdf_content(raw_content)
         
         return raw_content
         
@@ -53,10 +75,9 @@ async def _fetch_content(content: str, document_type: str) -> str:
         raise
     except Exception as e:
         logger.error(f"Unexpected error fetching content", 
-                    content_preview=content[:100],
+                    content_preview=content[:100] if not content.startswith("http") else content,
                     error=str(e))
         raise Exception(f"Failed to fetch content: {str(e)}")
-
 @traced(operation_name="ingest_job", langfuse_trace=True)
 @timed("ingest_job_duration_seconds")
 async def run_ingest_job(job_id: str, content: str, document_type: str) -> None:

@@ -11,7 +11,12 @@ from app.services.redis_job_manager import redis_job_registry
 from app.utils.sse_heartbeat import sse_heartbeat_manager
 from app.obs.decorators import traced
 from app.obs.logging_setup import get_logger
+from app.utils.robust_sse import robust_sse_manager
+from fastapi import Header
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
+security = HTTPBearer()
 logger = get_logger(__name__)
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
@@ -36,8 +41,20 @@ class JobStatusResponse(BaseModel):
     created_at: float
     updated_at: float
 
-@traced("ingest_endpoint")
 
+async def verify_sse_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Verify SSE access token."""
+    token = credentials.credentials
+    
+    if not token or len(token) < 10:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing SSE token"
+        )
+    return token
+
+
+@traced("ingest_endpoint")
 @router.post("", response_model=IngestResponse)
 async def ingest_document(request: IngestRequest) -> IngestResponse:
     try:
@@ -74,88 +91,76 @@ async def get_job_status(job_id: str) -> JobStatusResponse:
 
 @traced("job_stream_endpoint")
 @router.get("/{job_id}/stream")
-async def stream_job_progress(job_id: str, request: Request):
-    """Stream job progress via Server-Sent Events with heartbeats."""
+async def stream_job_progress(
+    job_id: str, 
+    request: Request,
+    token: str = Depends(verify_sse_token),
+    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
+    client_id: Optional[str] = Header(default=None, alias="X-Client-ID")
+):
+    """Stream job progress with reconnection support."""
     
     # Verify job exists
     job = await redis_job_registry.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    connection_id = f"ingest_{job_id}_{uuid.uuid4().hex[:8]}"
+    # Create robust SSE connection
+    connection = robust_sse_manager.create_connection(
+        job_id=job_id,
+        client_id=client_id,
+        last_event_id=last_event_id
+    )
     
     async def event_generator():
-        """Generate SSE events for job progress."""
+        """Generate events from Redis pub/sub."""
         try:
-            # Send initial job state
-            initial_event = sse_heartbeat_manager.create_sse_event(
-                event_type="job_status",
-                data={
+            # Send current job state first
+            current_job = await redis_job_registry.get_job(job_id)
+            if current_job:
+                yield {
                     "type": "job_status",
-                    "job_id": job.job_id,
-                    "status": job.status.value,
-                    "stage": job.stage,
-                    "progress": job.progress,
-                    "message": job.message,
-                    "chunks_created": job.chunks_created
+                    "job_id": current_job.job_id,
+                    "status": current_job.status.value,
+                    "stage": current_job.stage,
+                    "progress": current_job.progress,
+                    "message": current_job.message,
+                    "chunks_created": current_job.chunks_created
                 }
-            )
-            yield initial_event
             
-            # Subscribe to Redis events
-            last_heartbeat = 0
+            # Subscribe to job events
             async for event in redis_job_registry.subscribe_to_job_events(job_id):
-                # Check if client disconnected
-                if await request.is_disconnected():
-                    logger.info(f"Client disconnected from job stream", job_id=job_id)
-                    break
+                yield event
                 
-                # Send event
-                sse_event = sse_heartbeat_manager.create_sse_event(
-                    event_type="job_update",
-                    data=event
-                )
-                yield sse_event
-                
-                # Send heartbeat if needed
-                current_time = asyncio.get_event_loop().time()
-                if current_time - last_heartbeat > sse_heartbeat_manager.heartbeat_interval:
-                    heartbeat = sse_heartbeat_manager.create_heartbeat(connection_id)
-                    yield heartbeat
-                    last_heartbeat = current_time
-                
-                # Break on job completion
-                if event.get("type") == "job_updated" and event.get("status") in ["success", "error", "cancelled"]:
+                # Stop on completion
+                if event.get("type") == "job_updated" and \
+                   event.get("status") in ["success", "error", "cancelled"]:
                     break
                     
-        except asyncio.CancelledError:
-            logger.info(f"Job stream cancelled", job_id=job_id)
         except Exception as e:
-            logger.error(f"Job stream error", job_id=job_id, error=str(e))
-            error_event = sse_heartbeat_manager.create_sse_event(
-                event_type="error",
-                data={
-                    "type": "stream_error",
-                    "message": f"Stream error: {str(e)}"
-                }
-            )
-            yield error_event
+            logger.error(f"Event generator error", job_id=job_id, error=str(e))
+            yield {
+                "type": "stream_error",
+                "message": f"Stream error: {str(e)}"
+            }
     
-    # Wrap with heartbeat manager
-    wrapped_generator = sse_heartbeat_manager.heartbeat_stream(
-        connection_id=connection_id,
+    # Stream with reconnection support
+    event_stream = robust_sse_manager.stream_with_reconnection(
+        connection=connection,
         event_source=event_generator(),
-        client_disconnect_check=lambda: asyncio.create_task(request.is_disconnected())
+        request=request
     )
     
     return StreamingResponse(
-        wrapped_generator,
+        event_stream,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "Access-Control-Allow-Origin": "*",
-            "X-Connection-ID": connection_id
+            "X-Connection-ID": connection.connection_id,
+            "X-Client-ID": connection.client_id,
+            "X-Supports-Reconnection": "true"
         }
     )
 

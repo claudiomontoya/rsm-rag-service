@@ -321,6 +321,44 @@ def test_job_stream_endpoint():
                 lines_read += 1
                 if lines_read >= 3:  # Don't wait for entire job
                     break
+def test_pdf_ingestion():
+    """Test PDF document ingestion."""
+    response = client.post(
+        "/ingest",
+        json={
+            "content": "https://arxiv.org/pdf/1706.03762.pdf",  # Attention paper
+            "document_type": "pdf"
+        }
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+
+def test_cache_functionality():
+    """Test query caching."""
+    question = "What is attention mechanism?"
+    
+    # First query (cache miss)
+    response1 = client.post("/query", json={"question": question})
+    assert response1.status_code == 200
+    
+    # Second identical query (cache hit) 
+    response2 = client.post("/query", json={"question": question})
+    assert response2.status_code == 200
+    assert response1.json()["answer"] == response2.json()["answer"]
+
+def test_concurrent_job_limit():
+    """Test job concurrency limits."""
+    # Start multiple jobs quickly
+    job_ids = []
+    for i in range(15):  # More than MAX_CONCURRENT_JOBS
+        response = client.post("/ingest", json={
+            "content": f"Test document {i}",
+            "document_type": "text"
+        })
+        if response.status_code == 200:
+            job_ids.append(response.json()["job_id"])
+
+    assert len(job_ids) <= 10  # MAX_CONCURRENT_JOBS                
 
 @pytest.mark.slow
 def test_full_integration():

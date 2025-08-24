@@ -10,7 +10,8 @@ import redis.asyncio as redis
 from app.obs.logging_setup import get_logger
 from app.obs.decorators import traced
 from app.config import REDIS_URL
-
+import os
+from app.utils.circuit_breaker import redis_circuit_breaker
 logger = get_logger(__name__)
 
 class JobStatus(str, Enum):
@@ -46,15 +47,17 @@ class RedisJobState:
 class RedisJobRegistry:
     """Redis-backed job registry for production durability."""
     
-    def __init__(self, redis_url: str = None):
+    def __init__(self, redis_url: str = None, max_concurrent_jobs: int = 10):
         self.redis_url = redis_url or REDIS_URL or "redis://localhost:6379"
+        self.max_concurrent_jobs = max_concurrent_jobs
         self._redis: Optional[redis.Redis] = None
         self._pubsub_clients: Dict[str, redis.Redis] = {}
+        self._job_semaphore = None
         
     async def _get_redis(self) -> redis.Redis:
-        """Get Redis connection with lazy initialization."""
+        """Get Redis connection with circuit breaker protection."""
         if self._redis is None:
-            try:
+            async def _create_connection():
                 self._redis = redis.from_url(
                     self.redis_url,
                     decode_responses=True,
@@ -63,12 +66,16 @@ class RedisJobRegistry:
                     retry_on_timeout=True,
                     max_connections=20
                 )
-                # Test connection
                 await self._redis.ping()
+                return self._redis
+            
+            try:
+                await redis_circuit_breaker.call(_create_connection)
                 logger.info("Redis connection established", redis_url=self.redis_url)
             except Exception as e:
                 logger.error(f"Redis connection failed: {e}")
                 raise
+        
         return self._redis
     
     def _job_key(self, job_id: str) -> str:
@@ -85,7 +92,19 @@ class RedisJobRegistry:
     
     @traced("redis_create_job")
     async def create_job(self, timeout_seconds: int = 300, max_retries: int = 3) -> RedisJobState:
-        """Create a new job in Redis."""
+        """Create a new job in Redis with concurrency limits."""
+        
+        # Check concurrency limit
+        active_jobs = await self.list_active_jobs(limit=self.max_concurrent_jobs + 1)
+        running_jobs = [job for job in active_jobs if job.status in [JobStatus.QUEUED, JobStatus.RUNNING]]
+        
+        if len(running_jobs) >= self.max_concurrent_jobs:
+            logger.warning(f"Max concurrent jobs reached", 
+                         active_jobs=len(running_jobs),
+                         limit=self.max_concurrent_jobs)
+            raise Exception(f"Maximum concurrent jobs ({self.max_concurrent_jobs}) reached")
+        
+        # Rest of existing create_job logic...
         redis_client = await self._get_redis()
         
         job_id = f"job_{uuid.uuid4().hex[:12]}"
@@ -97,10 +116,8 @@ class RedisJobRegistry:
         
         # Store job in Redis
         job_data = asdict(job)
-        job_data["status"] = job.status.value               # Enum -> str
-        job_data["metadata"] = json.dumps(job.metadata)     # dict -> str
-
-        # eliminar None (redis no acepta None)
+        job_data["status"] = job.status.value
+        job_data["metadata"] = json.dumps(job.metadata)
         job_data = {k: v for k, v in job_data.items() if v is not None}
 
         pipe = redis_client.pipeline()
@@ -117,7 +134,10 @@ class RedisJobRegistry:
             "timestamp": job.created_at
         })
         
-        logger.info(f"Redis job created", job_id=job_id)
+        logger.info(f"Redis job created", 
+                   job_id=job_id,
+                   active_jobs=len(running_jobs) + 1,
+                   limit=self.max_concurrent_jobs)
         return job
     
     @traced("redis_get_job")
@@ -205,28 +225,56 @@ class RedisJobRegistry:
         await pipe.execute()
     
     async def subscribe_to_job_events(self, job_id: str):
-        """Subscribe to job events via Redis pub/sub."""
-        redis_client = redis.from_url(self.redis_url, decode_responses=True)
-        pubsub = redis_client.pubsub()
+        """Subscribe to job events with proper cleanup."""
+        redis_client = None
+        pubsub = None
         
         try:
+            redis_client = redis.from_url(self.redis_url, decode_responses=True)
+            pubsub = redis_client.pubsub()
+            
             await pubsub.subscribe(self._job_events_key(job_id))
             logger.info(f"Subscribed to job events", job_id=job_id)
             
+            # Set a timeout for subscription
+            timeout = 300  # 5 minutes timeout
+            start_time = time.time()
+            
             async for message in pubsub.listen():
+                # Check timeout
+                if time.time() - start_time > timeout:
+                    logger.warning(f"Job event subscription timeout", job_id=job_id)
+                    break
+                    
                 if message['type'] == 'message':
                     try:
                         event = json.loads(message['data'])
                         yield event
+                        
+                        # Update timeout on activity
+                        start_time = time.time()
+                        
                     except json.JSONDecodeError:
                         logger.error(f"Invalid event JSON", job_id=job_id)
                         continue
+                        
         except Exception as e:
             logger.error(f"Pub/sub error", job_id=job_id, error=str(e))
         finally:
-            await pubsub.unsubscribe(self._job_events_key(job_id))
-            await redis_client.close()
-    
+            # Ensure cleanup
+            try:
+                if pubsub:
+                    await pubsub.unsubscribe(self._job_events_key(job_id))
+                    await pubsub.close()
+                    logger.debug(f"Pub/sub unsubscribed", job_id=job_id)
+            except Exception as e:
+                logger.error(f"Pub/sub cleanup error", job_id=job_id, error=str(e))
+            
+            try:
+                if redis_client:
+                    await redis_client.close()
+            except Exception as e:
+                logger.error(f"Redis client cleanup error", job_id=job_id, error=str(e))
     @traced("redis_list_jobs")
     async def list_active_jobs(self, limit: int = 100) -> List[RedisJobState]:
         """List active jobs."""
@@ -281,6 +329,25 @@ class RedisJobRegistry:
                 "status": "unhealthy",
                 "error": str(e)
             }
+    @traced("redis_cleanup_completed_jobs")
+    async def cleanup_completed_jobs(self, older_than_hours: int = 24) -> int:
+        """Clean up completed jobs older than specified hours."""
+        redis_client = await self._get_redis()
+        
+        cutoff_time = time.time() - (older_than_hours * 3600)
+        job_ids = await redis_client.smembers(self._job_list_key())
+        
+        cleaned_count = 0
+        for job_id in job_ids:
+            job = await self.get_job(job_id)
+            
+            if job and job.status in [JobStatus.SUCCESS, JobStatus.ERROR, JobStatus.CANCELLED]:
+                if job.updated_at < cutoff_time:
+                    await self.cleanup_job(job_id)
+                    cleaned_count += 1
+        
+        logger.info(f"Cleaned up completed jobs", cleaned_count=cleaned_count)
+        return cleaned_count        
 
 # Global Redis job registry instance
-redis_job_registry = RedisJobRegistry()
+redis_job_registry = RedisJobRegistry(max_concurrent_jobs=int(os.getenv("MAX_CONCURRENT_JOBS", "10")))
