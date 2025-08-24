@@ -1,0 +1,70 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "RAG Microservice Dashboard",
+    "tags": ["rag", "microservice", "production"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "Request Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(http_requests_total[5m])",
+            "legendFormat": "{{method}} {{endpoint}}"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Requests/sec"
+          }
+        ]
+      },
+      {
+        "title": "Response Time P95",
+        "type": "graph", 
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "P95 {{endpoint}}"
+          }
+        ]
+      },
+      {
+        "title": "Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(http_requests_total{status=~\"4..|5..\"}[5m]) / rate(http_requests_total[5m])",
+            "legendFormat": "Error Rate"
+          }
+        ]
+      },
+      {
+        "title": "Active Jobs",
+        "type": "singlestat",
+        "targets": [
+          {
+            "expr": "active_jobs",
+            "legendFormat": "Jobs"
+          }
+        ]
+      },
+      {
+        "title": "Query Performance by Retriever",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(query_duration_seconds_bucket[5m]))",
+            "legendFormat": "{{retriever_type}} P95"
+          }
+        ]
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "5s"
+  }
+}

@@ -3,7 +3,9 @@ import asyncio
 import uuid
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from app.models.schemas import IngestRequest, IngestResponse, JobStatusResponse
+from pydantic import BaseModel
+from typing import Literal, Optional
+
 from app.services.ingest_service import start_ingest_job
 from app.services.redis_job_manager import redis_job_registry
 from app.utils.sse_heartbeat import sse_heartbeat_manager
@@ -13,20 +15,41 @@ from app.obs.logging_setup import get_logger
 logger = get_logger(__name__)
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
-@router.post("", response_model=IngestResponse)
+# Schemas definidos directamente aquí para evitar imports circulares
+class IngestRequest(BaseModel):
+    content: str
+    document_type: Literal["text", "html", "markdown"] = "text"
+
+class IngestResponse(BaseModel):
+    status: Literal["success", "error"]
+    message: str
+    job_id: str
+    chunks_created: int = 0
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: Literal["queued", "running", "success", "error"]
+    stage: str
+    progress: float
+    message: Optional[str] = None
+    chunks_created: int
+    created_at: float
+    updated_at: float
+
 @traced("ingest_endpoint")
+@router.post("", response_model=IngestResponse)
 async def ingest_document(request: IngestRequest) -> IngestResponse:
     """Start document ingestion job."""
     try:
         job = await redis_job_registry.create_job()
         
-        # Start the job in background
-        asyncio.create_task(start_ingest_job(job.job_id, request.content, request.document_type))
+        # Start the job in background  
+        job_id = await start_ingest_job(request.content, request.document_type)
         
         return IngestResponse(
             status="success",
             message="Ingestion job started",
-            job_id=job.job_id,
+            job_id=job_id,
             chunks_created=0
         )
         
@@ -34,8 +57,8 @@ async def ingest_document(request: IngestRequest) -> IngestResponse:
         logger.error(f"Failed to start ingestion", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to start ingestion: {str(e)}")
 
-@router.get("/{job_id}/status", response_model=JobStatusResponse)
 @traced("job_status_endpoint")
+@router.get("/{job_id}/status", response_model=JobStatusResponse)
 async def get_job_status(job_id: str) -> JobStatusResponse:
     """Get job status."""
     job = await redis_job_registry.get_job(job_id)
@@ -53,8 +76,8 @@ async def get_job_status(job_id: str) -> JobStatusResponse:
         updated_at=job.updated_at
     )
 
-@router.get("/{job_id}/stream")
 @traced("job_stream_endpoint")
+@router.get("/{job_id}/stream")
 async def stream_job_progress(job_id: str, request: Request):
     """Stream job progress via Server-Sent Events with heartbeats."""
     
@@ -140,8 +163,8 @@ async def stream_job_progress(job_id: str, request: Request):
         }
     )
 
-@router.get("/jobs/active")
 @traced("list_active_jobs")
+@router.get("/jobs/active")
 async def list_active_jobs(limit: int = 50):
     """List active jobs."""
     try:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import time
 import functools
-import inspect  # ← AGREGAR ESTE IMPORT
+import inspect
 from typing import Callable, Any, Dict, Optional
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
