@@ -97,12 +97,16 @@ class RedisJobRegistry:
         
         # Store job in Redis
         job_data = asdict(job)
-        job_data['status'] = job.status.value  # Convert enum to string
-        
+        job_data["status"] = job.status.value               # Enum -> str
+        job_data["metadata"] = json.dumps(job.metadata)     # dict -> str
+
+        # eliminar None (redis no acepta None)
+        job_data = {k: v for k, v in job_data.items() if v is not None}
+
         pipe = redis_client.pipeline()
         pipe.hset(self._job_key(job_id), mapping=job_data)
         pipe.sadd(self._job_list_key(), job_id)
-        pipe.expire(self._job_key(job_id), timeout_seconds + 3600)  # Job data TTL
+        pipe.expire(self._job_key(job_id), timeout_seconds + 3600)
         await pipe.execute()
         
         # Publish creation event

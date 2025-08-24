@@ -37,25 +37,21 @@ class JobStatusResponse(BaseModel):
     updated_at: float
 
 @traced("ingest_endpoint")
+
 @router.post("", response_model=IngestResponse)
 async def ingest_document(request: IngestRequest) -> IngestResponse:
-    """Start document ingestion job."""
     try:
-        job = await redis_job_registry.create_job()
-        
-        # Start the job in background  
         job_id = await start_ingest_job(request.content, request.document_type)
-        
         return IngestResponse(
             status="success",
             message="Ingestion job started",
             job_id=job_id,
             chunks_created=0
         )
-        
     except Exception as e:
-        logger.error(f"Failed to start ingestion", error=str(e))
+        logger.error("Failed to start ingestion", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to start ingestion: {str(e)}")
+
 
 @traced("job_status_endpoint")
 @router.get("/{job_id}/status", response_model=JobStatusResponse)

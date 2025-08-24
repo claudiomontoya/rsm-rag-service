@@ -241,19 +241,10 @@ async def run_ingest_job(job_id: str, content: str, document_type: str) -> None:
                 })
 
 # CAMBIAR start_ingest_job para que retorne job_id:
+# app/services/ingest_service.py
 @traced(operation_name="start_ingest_job")
 async def start_ingest_job(content: str, document_type: str) -> str:
-    """Start an async ingestion job and return job_id."""
-    job = await redis_job_registry.create_job(
-        timeout_seconds=600,
-        max_retries=2
-    )
-    
-    logger.info(f"Created ingest job", 
-               job_id=job.job_id,
-               document_type=document_type)
-    
-    # Start the job in background
+    job = await redis_job_registry.create_job(timeout_seconds=600, max_retries=2)
+    logger.info("Created ingest job", job_id=job.job_id, document_type=document_type)
     asyncio.create_task(run_ingest_job(job.job_id, content, document_type))
-    
     return job.job_id
