@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import time
+import time
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from app.obs.metrics import metrics_registry
