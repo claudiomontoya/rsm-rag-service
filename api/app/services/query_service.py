@@ -9,7 +9,8 @@ from app.obs.langfuse import trace_with_langfuse, log_retrieval
 from app.obs.logging_setup import get_logger
 from app.obs.metrics import inc_counter, record_duration
 from app.config import RERANK_ENABLED
-
+from app.services.llm_service import llm_service
+from app.services.query_cache import query_cache
 logger = get_logger(__name__)
 
 class RetrieverFactory:
@@ -47,53 +48,26 @@ class RetrieverFactory:
         return base_retriever
 
 @traced(operation_name="generate_answer", include_args=True)
-def _generate_answer(question: str, sources: list, retriever_name: str) -> str:
-    """Generate answer based on sources with observability."""
-    
-    logger.info(f"Generating answer", 
-               question=question,
-               sources_count=len(sources),
-               retriever=retriever_name)
-    
-    if not sources:
-        answer = "I couldn't find relevant information to answer your question."
-        logger.warning("No sources available for answer generation")
-        return answer
-    
-    # Enhanced answer generation with source analysis
-    context_parts = []
-    total_score = 0
-    
-    for i, source in enumerate(sources[:3], 1):
-        text_preview = source["text"][:200] + "..." if len(source["text"]) > 200 else source["text"]
-        score = source.get("score", 0)
-        total_score += score
-        
-        score_info = f" (score: {score:.3f})" if score else ""
-        context_parts.append(f"[{i}] {text_preview}{score_info}")
-    
-    context = " ".join(context_parts)
-    avg_score = total_score / len(sources) if sources else 0
-    
-    # Generate comprehensive answer
-    answer = f"""Based on {len(sources)} sources using {retriever_name} search (avg relevance: {avg_score:.3f}):
-
-{context}
-
-To answer your question '{question}': {context[:400]}..."""
-    
-    logger.info(f"Answer generated", 
-               answer_length=len(answer),
-               avg_source_score=avg_score)
-    
-    return answer
+async def _generate_answer(question: str, sources: list, retriever_name: str) -> str:
+    """Generate answer using LLM service."""
+    return await llm_service.generate_answer(question, sources)
 
 @traced(operation_name="query_documents", langfuse_trace=True)
 @timed("query_duration_ms")
 async def query_documents(question: str, retriever_type: str = "dense", top_k: int = 5) -> Dict[str, Any]:
-    """Query documents with comprehensive observability."""
+    """Query documents with comprehensive observability and caching."""
     
-    logger.info(f"Processing query", 
+    # Check cache first
+    cached_result = query_cache.get(question, retriever_type, top_k)
+    if cached_result:
+        logger.info(f"Returning cached result", 
+                   question=question[:50],
+                   retriever_type=retriever_type,
+                   cache_hit=True)
+        inc_counter("queries_processed", {"retriever": retriever_type, "cached": "true"})
+        return cached_result
+    
+    logger.info(f"Processing fresh query", 
                question=question,
                retriever_type=retriever_type,
                top_k=top_k)
@@ -117,11 +91,7 @@ async def query_documents(question: str, retriever_type: str = "dense", top_k: i
                 log_retrieval(lf_ctx["trace"], question, results, retriever.name)
             
             # Generate answer
-            answer = _generate_answer(question, results, retriever.name)
-            
-            # Record metrics
-            inc_counter("queries_processed", {"retriever": retriever.name})
-            inc_counter("documents_retrieved", value=len(results))
+            answer = await _generate_answer(question, results, retriever.name)
             
             response = {
                 "answer": answer,
@@ -130,15 +100,22 @@ async def query_documents(question: str, retriever_type: str = "dense", top_k: i
                 "metadata": {
                     "total_sources": len(results),
                     "query_method": retriever_type,
-                    "avg_score": sum(r.get("score", 0) for r in results) / len(results) if results else 0
+                    "avg_score": sum(r.get("score", 0) for r in results) / len(results) if results else 0,
+                    "cached": False
                 }
             }
+            
+            # Cache the result
+            query_cache.set(question, retriever_type, top_k, response)
+            
+            # Record metrics
+            inc_counter("queries_processed", {"retriever": retriever.name, "cached": "false"})
+            inc_counter("documents_retrieved", value=len(results))
             
             logger.info(f"Query completed successfully", 
                        retriever=retriever.name,
                        sources_found=len(results))
             
-            # Log to Langfuse
             if lf_ctx and lf_ctx.get("trace"):
                 lf_ctx["trace"].update(output={
                     "answer_preview": answer[:100],
@@ -154,10 +131,8 @@ async def query_documents(question: str, retriever_type: str = "dense", top_k: i
                         error=str(e),
                         exc_info=True)
             
-            # Record error metrics
             inc_counter("queries_failed", {"retriever": retriever_type})
             
-            # Log to Langfuse
             if lf_ctx and lf_ctx.get("trace"):
                 lf_ctx["trace"].update(output={
                     "status": "error",

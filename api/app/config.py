@@ -3,12 +3,21 @@ import os
 
 # Qdrant Configuration
 QDRANT_URL: str = os.getenv("QDRANT_URL", "http://localhost:6333")
-COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "docs_v1")
+COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "docs_m3")
 
 # Embeddings Configuration
 EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "local").lower()
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
 OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
+
+# LLM Configuration
+LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "dummy").lower()
+LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o-mini") 
+LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "1000"))
+
+# Redis Configuration
+REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379")
 
 # OpenTelemetry Configuration
 OTEL_EXPORTER_OTLP_ENDPOINT: str | None = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -22,3 +31,8 @@ LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
 # Reranking Configuration
 RERANK_ENABLED: bool = os.getenv("RERANK_ENABLED", "false").lower() == "true"
 RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+
+# Production Configuration
+REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", "30"))
+MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
+HEARTBEAT_INTERVAL: int = int(os.getenv("HEARTBEAT_INTERVAL", "30"))

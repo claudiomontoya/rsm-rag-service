@@ -1,50 +1,85 @@
 services:
-  # Vector Database
+  redis:
+    image: redis:7.2-alpine
+    container_name: rag-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: rag-qdrant-v3
+    container_name: rag-qdrant-v1
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__HTTP_PORT: 6333
+      QDRANT__SERVICE__GRPC_PORT: 6334
+    # SIN HEALTHCHECK - problema con curl/wget
 
-  # Jaeger simplified
   jaeger:
     image: jaegertracing/all-in-one:1.54
     container_name: rag-jaeger
     ports:
-      - "16686:16686"  # Jaeger UI
-      - "4317:4317"    # OTLP gRPC 
-      - "4318:4318"    # OTLP HTTP
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
     environment:
       - COLLECTOR_OTLP_ENABLED=true
       - SPAN_STORAGE_TYPE=memory
+      - MEMORY_MAX_TRACES=50000
+    # SIN HEALTHCHECK - problema con curl/wget
 
-  # Main API
   api:
     build:
       context: ./api
       dockerfile: Dockerfile
-    container_name: rag-api-v3
+    container_name: rag-api-v1
     env_file:
       - .env
     environment:
       QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
-      OTEL_SERVICE_NAME: rag-microservice-v3
+      OTEL_SERVICE_NAME: rag-microservice-v1
       LOG_STRUCTURED: "true"
+      LOG_LEVEL: "INFO"
+      REQUEST_TIMEOUT: "60"
+      MAX_RETRIES: "3"
+      HEARTBEAT_INTERVAL: "30"
+      RATE_LIMIT_REQUESTS: "100"
+      RATE_LIMIT_WINDOW: "60"
+      MAX_REQUEST_SIZE: "10485760"
     ports:
       - "8000:8000"
     depends_on:
-      - qdrant
-      - jaeger
-    # Add delay to let dependencies start
-    restart: on-failure
+      redis:
+        condition: service_healthy
+      # SOLO Redis healthcheck, otros servicios arrancan en paralelo
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
 volumes:
   qdrant_data:
+    driver: local
+  redis_data:
+    driver: local
 
 networks:
   default:
-    name: rag-observability
+    name: rag-production
+    driver: bridge

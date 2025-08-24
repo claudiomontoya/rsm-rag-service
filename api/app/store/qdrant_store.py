@@ -53,3 +53,6 @@ def search_similar(query_vector: List[float], limit: int = 5) -> List[Dict[str, 
         }
         for hit in results
     ]
+def search_vectors(query_vector: List[float], limit: int = 5) -> List[Dict[str, Any]]:
+    """Search vectors in Qdrant."""
+    return search_similar(query_vector, limit)    

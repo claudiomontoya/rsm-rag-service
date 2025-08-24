@@ -3,62 +3,87 @@ import asyncio
 import uuid
 from typing import List
 import httpx
-from app.utils.split import strip_html, strip_markdown, simple_word_split
+from app.utils.semantic_chunking import semantic_chunker
+from app.utils.retry_backoff import retry_with_backoff, DEFAULT_HTTP_RETRY
 from app.deps.embeddings import embed_texts, embedding_dimension
 from app.store.qdrant_store import ensure_collection, add_documents
 from app.store.memory_bm25 import bm25_index
-from app.services.job_manager import job_registry, JobStatus
+from app.services.redis_job_manager import redis_job_registry, JobStatus
 from app.obs.decorators import traced, timed
-from app.obs.langfuse import trace_with_langfuse, log_retrieval
+from app.obs.langfuse import trace_with_langfuse
 from app.obs.logging_setup import get_logger
-from app.obs.metrics import inc_counter, record_duration
+from app.obs.prometheus_metrics import prometheus_metrics
+from app.utils.pdf_extractor import pdf_extractor
 
 logger = get_logger(__name__)
 
+@retry_with_backoff(
+    config=DEFAULT_HTTP_RETRY, 
+    operation_name="fetch_content"
+)
 @traced(operation_name="fetch_content", include_args=True)
 async def _fetch_content(content: str, document_type: str) -> str:
-    """Fetch and clean content based on type."""
+    """Fetch and clean content with retry logic."""
     try:
         if content.startswith(("http://", "https://")):
-            logger.info(f"Fetching content from URL", url=content)
+            logger.info(f"Fetching content from URL", url=content, document_type=document_type)
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(content)
-                response.raise_for_status()
-                raw_content = response.text
+            # Special handling for PDF
+            if document_type == "pdf":
+                raw_content = await pdf_extractor.fetch_and_extract(content)
+            else:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(30.0),
+                    follow_redirects=True,
+                    limits=httpx.Limits(max_connections=10)
+                ) as client:
+                    response = await client.get(content)
+                    response.raise_for_status()
+                    raw_content = response.text
                 
             logger.info(f"Successfully fetched content", 
                        url=content, 
-                       content_length=len(raw_content))
+                       content_length=len(raw_content),
+                       document_type=document_type)
         else:
-            raw_content = content
-            logger.info(f"Using provided content", content_length=len(raw_content))
+            # Direct content
+            if document_type == "pdf":
+                # Assume base64 encoded PDF content
+                import base64
+                try:
+                    pdf_bytes = base64.b64decode(content)
+                    raw_content = pdf_extractor.extract_from_bytes(pdf_bytes)
+                except Exception as e:
+                    raise ValueError(f"Invalid PDF content: {str(e)}")
+            else:
+                raw_content = content
+                
+            logger.info(f"Using provided content", 
+                       content_length=len(raw_content),
+                       document_type=document_type)
         
-        if document_type == "html":
-            cleaned = strip_html(raw_content)
-        elif document_type == "markdown":
-            cleaned = strip_markdown(raw_content)
-        else:
-            cleaned = raw_content
+        # Validate PDF content
+        if document_type == "pdf":
+            raw_content = pdf_extractor.validate_pdf_content(raw_content)
         
-        logger.info(f"Content cleaned", 
-                   original_length=len(raw_content),
-                   cleaned_length=len(cleaned),
-                   document_type=document_type)
+        return raw_content
         
-        return cleaned
-        
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error fetching content", 
+                    url=content if content.startswith(("http://", "https://")) else "inline",
+                    error=str(e))
+        raise
     except Exception as e:
-        logger.error(f"Failed to fetch/clean content", 
-                    content_preview=content[:100],
-                    document_type=document_type,
+        logger.error(f"Unexpected error fetching content", 
+                    content_preview=content[:100] if not content.startswith("http") else content,
                     error=str(e))
         raise Exception(f"Failed to fetch content: {str(e)}")
-
 @traced(operation_name="ingest_job", langfuse_trace=True)
-@timed("ingest_job_duration_ms")
+@timed("ingest_job_duration_seconds")
 async def run_ingest_job(job_id: str, content: str, document_type: str) -> None:
-    """Run the ingestion job asynchronously with full observability."""
+    """Run the ingestion job with semantic chunking and retries."""
+    
+    job_start_time = asyncio.get_event_loop().time()
     
     logger.info(f"Starting ingest job", 
                job_id=job_id, 
@@ -72,7 +97,8 @@ async def run_ingest_job(job_id: str, content: str, document_type: str) -> None:
     }) as lf_ctx:
         
         try:
-            await job_registry.update_job(
+            # Step 1: Fetch and clean content
+            await redis_job_registry.update_job(
                 job_id, 
                 status=JobStatus.RUNNING,
                 stage="fetching",
@@ -83,54 +109,62 @@ async def run_ingest_job(job_id: str, content: str, document_type: str) -> None:
             cleaned_content = await _fetch_content(content, document_type)
             
             if not cleaned_content.strip():
-                logger.error("No content after cleaning", job_id=job_id)
-                await job_registry.update_job(
+                await redis_job_registry.update_job(
                     job_id,
                     status=JobStatus.ERROR,
-                    message="No content to process after cleaning"
+                    message="No content after cleaning"
                 )
-                inc_counter("ingest_jobs_failed", {"reason": "empty_content"})
+                prometheus_metrics.record_ingest_job("failed", document_type, 0)
                 return
-        
-            await job_registry.update_job(
+            
+            # Step 2: Semantic chunking
+            await redis_job_registry.update_job(
                 job_id,
-                stage="splitting",
+                stage="chunking",
                 progress=20.0,
-                message="Splitting content into chunks..."
+                message="Creating semantic chunks..."
             )
             
-            chunks = simple_word_split(cleaned_content)
+            semantic_chunks = semantic_chunker.chunk_text(cleaned_content, document_type)
             
-            if not chunks:
-                logger.error("No chunks created", job_id=job_id)
-                await job_registry.update_job(
+            if not semantic_chunks:
+                await redis_job_registry.update_job(
                     job_id,
                     status=JobStatus.ERROR,
                     message="No chunks created from content"
                 )
-                inc_counter("ingest_jobs_failed", {"reason": "no_chunks"})
+                prometheus_metrics.record_ingest_job("failed", document_type, 0)
                 return
             
-            logger.info(f"Content split into chunks", 
+            logger.info(f"Semantic chunking completed", 
                        job_id=job_id, 
-                       chunks_count=len(chunks))
-            await job_registry.update_job(
+                       chunks_count=len(semantic_chunks))
+            
+            # Step 3: Generate embeddings
+            await redis_job_registry.update_job(
                 job_id,
                 stage="embedding",
                 progress=40.0,
-                message=f"Creating embeddings for {len(chunks)} chunks..."
+                message=f"Creating embeddings for {len(semantic_chunks)} chunks..."
             )
             
+            # Extract text from semantic chunks
+            chunk_texts = [chunk.text for chunk in semantic_chunks]
+            
             with trace_with_langfuse("embedding_generation", {
-                "chunks_count": len(chunks),
+                "chunks_count": len(chunk_texts),
                 "embedding_model": "configured_model"
             }):
-                embeddings = embed_texts(chunks)
-                
+                embeddings = embed_texts(chunk_texts)
+            
+            prometheus_metrics.record_embeddings(len(embeddings))
+            
             logger.info(f"Embeddings generated", 
                        job_id=job_id,
                        embeddings_count=len(embeddings))
-            await job_registry.update_job(
+            
+            # Step 4: Store in vector database
+            await redis_job_registry.update_job(
                 job_id,
                 stage="storing",
                 progress=70.0,
@@ -138,72 +172,99 @@ async def run_ingest_job(job_id: str, content: str, document_type: str) -> None:
             )
             
             ensure_collection(embedding_dimension())
-            chunks_created = add_documents(chunks, embeddings)
+            chunks_created = add_documents(chunk_texts, embeddings)
             
             logger.info(f"Documents stored in vector DB", 
                        job_id=job_id,
                        chunks_stored=chunks_created)
-            await job_registry.update_job(
+            
+            # Step 5: Build BM25 index
+            await redis_job_registry.update_job(
                 job_id,
                 stage="indexing",
                 progress=85.0,
-                message="Building BM25 keyword index..."
+                message="Building BM25 index..."
             )
             
-            metadata = [{"page": i+1, "doc_id": str(uuid.uuid4())} for i in range(len(chunks))]
-            bm25_index.add_documents(chunks, metadata)
+            # Create metadata from semantic chunks
+            metadata = []
+            for i, chunk in enumerate(semantic_chunks):
+                metadata.append({
+                    "page": chunk.page or (i + 1),
+                    "doc_id": str(uuid.uuid4()),
+                    "title": chunk.title,
+                    "section": chunk.section,
+                    "chunk_index": chunk.chunk_index,
+                    "word_count": chunk.word_count,
+                    "has_title_context": chunk.metadata.get("has_title_context", False)
+                })
+            
+            bm25_index.add_documents(chunk_texts, metadata)
             
             logger.info(f"BM25 index updated", 
                        job_id=job_id,
-                       documents_indexed=len(chunks))
-            await job_registry.update_job(
+                       documents_indexed=len(chunk_texts))
+            
+            # Step 6: Complete
+            job_duration = asyncio.get_event_loop().time() - job_start_time
+            
+            await redis_job_registry.update_job(
                 job_id,
                 status=JobStatus.SUCCESS,
                 stage="completed",
                 progress=100.0,
-                message=f"Successfully ingested {chunks_created} chunks",
+                message=f"Successfully ingested {chunks_created} semantic chunks",
                 chunks_created=chunks_created
             )
-            inc_counter("ingest_jobs_completed")
-            inc_counter("documents_ingested", value=chunks_created)
+            
+            # Record metrics
+            prometheus_metrics.record_ingest_job("success", document_type, job_duration)
             
             logger.info(f"Ingest job completed successfully", 
                        job_id=job_id,
-                       chunks_created=chunks_created)
+                       chunks_created=chunks_created,
+                       duration_seconds=round(job_duration, 2))
+            
+            # Log to Langfuse
             if lf_ctx and lf_ctx.get("trace"):
                 lf_ctx["trace"].update(output={
                     "status": "success",
-                    "chunks_created": chunks_created
+                    "chunks_created": chunks_created,
+                    "semantic_chunks": len(semantic_chunks),
+                    "duration_seconds": job_duration
                 })
             
         except Exception as e:
+            job_duration = asyncio.get_event_loop().time() - job_start_time
+            
             logger.error(f"Ingest job failed", 
                         job_id=job_id,
                         error=str(e),
+                        duration_seconds=round(job_duration, 2),
                         exc_info=True)
             
-            await job_registry.update_job(
+            await redis_job_registry.update_job(
                 job_id,
                 status=JobStatus.ERROR,
                 stage="error",
                 message=f"Ingestion failed: {str(e)}"
             )
-            inc_counter("ingest_jobs_failed", {"reason": "exception"})
+            
+            # Record error metrics
+            prometheus_metrics.record_ingest_job("failed", document_type, job_duration)
+            
+            # Log to Langfuse
             if lf_ctx and lf_ctx.get("trace"):
                 lf_ctx["trace"].update(output={
                     "status": "error",
-                    "error": str(e)
+                    "error": str(e),
+                    "duration_seconds": job_duration
                 })
+
 
 @traced(operation_name="start_ingest_job")
 async def start_ingest_job(content: str, document_type: str) -> str:
-    """Start an async ingestion job and return job_id."""
-    job = await job_registry.create_job()
-    
-    logger.info(f"Created ingest job", 
-               job_id=job.job_id,
-               document_type=document_type)
+    job = await redis_job_registry.create_job(timeout_seconds=600, max_retries=2)
+    logger.info("Created ingest job", job_id=job.job_id, document_type=document_type)
     asyncio.create_task(run_ingest_job(job.job_id, content, document_type))
-    inc_counter("ingest_jobs_created", {"document_type": document_type})
-    
     return job.job_id

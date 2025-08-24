@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 class IngestRequest(BaseModel):
     content: str = Field(..., description="Document content or URL")
-    document_type: Literal["text", "html", "markdown"] = "text"
+    document_type: Literal["text", "html", "markdown", "pdf"] = "text"
 
 class IngestResponse(BaseModel):
     status: Literal["success", "error"]

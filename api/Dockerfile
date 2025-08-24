@@ -4,12 +4,14 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
+    wget \
+    libmagic1 \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --default-timeout=1000 --no-cache-dir -r requirements.txt
 
-# Aquí debe existir la carpeta api/app/ con: __init__.py, main.py, obs/, routers/
 COPY app ./app
 
 EXPOSE 8000
