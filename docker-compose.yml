@@ -1,50 +1,91 @@
 services:
+  # Redis for job backend
+  redis:
+    image: redis:7.2-alpine
+    container_name: rag-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+
   # Vector Database
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: rag-qdrant-v3
+    container_name: rag-qdrant-v1
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__HTTP_PORT: 6333
+      QDRANT__SERVICE__GRPC_PORT: 6334
 
-  # Jaeger simplified
+  # Jaeger for distributed tracing
   jaeger:
     image: jaegertracing/all-in-one:1.54
     container_name: rag-jaeger
     ports:
       - "16686:16686"  # Jaeger UI
-      - "4317:4317"    # OTLP gRPC 
+      - "4317:4317"    # OTLP gRPC
       - "4318:4318"    # OTLP HTTP
     environment:
       - COLLECTOR_OTLP_ENABLED=true
       - SPAN_STORAGE_TYPE=memory
+      - MEMORY_MAX_TRACES=50000
 
-  # Main API
   api:
     build:
       context: ./api
       dockerfile: Dockerfile
-    container_name: rag-api-v3
+    container_name: rag-api-v1
     env_file:
       - .env
     environment:
+      # Service URLs
       QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
-      OTEL_SERVICE_NAME: rag-microservice-v3
+      OTEL_SERVICE_NAME: rag-microservice-v1
+      
+      # Production settings
       LOG_STRUCTURED: "true"
+      LOG_LEVEL: "INFO"
+      REQUEST_TIMEOUT: "30"
+      MAX_RETRIES: "3"
+      HEARTBEAT_INTERVAL: "30"
+      
+      # Security settings
+      RATE_LIMIT_REQUESTS: "100"
+      RATE_LIMIT_WINDOW: "60"
+      MAX_REQUEST_SIZE: "10485760"  # 10MB
+      
     ports:
       - "8000:8000"
     depends_on:
-      - qdrant
-      - jaeger
-    # Add delay to let dependencies start
-    restart: on-failure
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
 
 volumes:
   qdrant_data:
+    driver: local
+  redis_data:
+    driver: local
 
 networks:
   default:
-    name: rag-observability
+    name: rag-production
+    driver: bridge
