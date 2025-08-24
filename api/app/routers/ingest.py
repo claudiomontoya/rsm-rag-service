@@ -1,6 +1,6 @@
 from __future__ import annotations
 import asyncio
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from app.models.schemas import IngestRequest, IngestResponse, JobStatusResponse
 from app.services.ingest_service import start_ingest_job
@@ -25,23 +25,6 @@ async def ingest_document(request: IngestRequest) -> IngestResponse:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start ingestion: {str(e)}")
 
-@router.post("/file", response_model=IngestResponse)
-async def ingest_file(file: UploadFile = File(...)) -> IngestResponse:
-    """Ingest document from uploaded file."""
-    try:
-        content = (await file.read()).decode("utf-8", errors="ignore")
-        job_id = await start_ingest_job(content, "text")
-        
-        return IngestResponse(
-            status="success", 
-            message=f"File '{file.filename}' ingestion started",
-            job_id=job_id,
-            chunks_created=0
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
-
 @router.get("/{job_id}/status", response_model=JobStatusResponse)
 async def get_job_status(job_id: str) -> JobStatusResponse:
     """Get job status."""
@@ -51,7 +34,7 @@ async def get_job_status(job_id: str) -> JobStatusResponse:
     
     return JobStatusResponse(
         job_id=job.job_id,
-        status=job.status,
+        status=job.status.value,  # ← ARREGLADO: convertir Enum a string
         stage=job.stage,
         progress=job.progress,
         message=job.message,
@@ -78,7 +61,7 @@ async def stream_job_progress(job_id: str):
             initial_event = {
                 "type": "job_status",
                 "job_id": job.job_id,
-                "status": job.status,
+                "status": job.status.value,  # ← ARREGLADO aquí también
                 "stage": job.stage,
                 "progress": job.progress,
                 "message": job.message,

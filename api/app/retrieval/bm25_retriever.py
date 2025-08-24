@@ -13,8 +13,6 @@ class BM25Retriever(Retriever):
     async def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """Search using BM25 keyword matching."""
         results = bm25_index.search(query, top_k=top_k)
-        
-        # Convert to consistent format
         formatted_results = []
         for result in results:
             formatted_results.append({
