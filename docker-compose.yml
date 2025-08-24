@@ -1,28 +1,86 @@
 version: "3.9"
 
 services:
+  # Vector Database
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: rag-qdrant-v1
+    container_name: rag-qdrant-v3
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
+  # OpenTelemetry Collector
+  otel-collector:
+    image: otel/opentelemetry-collector:0.102.1
+    container_name: rag-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"  # OTLP gRPC
+      - "4318:4318"  # OTLP HTTP
+    depends_on:
+      - jaeger
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:13133/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Jaeger for distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.54
+    container_name: rag-jaeger
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14250:14250"  # gRPC
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:14269/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Main API
   api:
     build:
       context: ./api
       dockerfile: Dockerfile
-    container_name: rag-api-v1
+    container_name: rag-api-v3
     env_file:
       - .env
     environment:
+      # Override with Docker network URLs
       QDRANT_URL: http://qdrant:6333
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: rag-microservice-v3
+      # Enable structured logging in container
+      LOG_STRUCTURED: "true"
     ports:
       - "8000:8000"
     depends_on:
-      - qdrant
+      qdrant:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 volumes:
   qdrant_data:
+
+networks:
+  default:
+    name: rag-observability
