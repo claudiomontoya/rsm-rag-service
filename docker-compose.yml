@@ -1,28 +1,50 @@
-version: "3.9"
-
 services:
+  # Vector Database
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: rag-qdrant-v1
+    container_name: rag-qdrant-v3
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
 
+  # Jaeger simplified
+  jaeger:
+    image: jaegertracing/all-in-one:1.54
+    container_name: rag-jaeger
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC 
+      - "4318:4318"    # OTLP HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - SPAN_STORAGE_TYPE=memory
+
+  # Main API
   api:
     build:
       context: ./api
       dockerfile: Dockerfile
-    container_name: rag-api-v1
+    container_name: rag-api-v3
     env_file:
       - .env
     environment:
       QDRANT_URL: http://qdrant:6333
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_SERVICE_NAME: rag-microservice-v3
+      LOG_STRUCTURED: "true"
     ports:
       - "8000:8000"
     depends_on:
       - qdrant
+      - jaeger
+    # Add delay to let dependencies start
+    restart: on-failure
 
 volumes:
   qdrant_data:
+
+networks:
+  default:
+    name: rag-observability
