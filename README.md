@@ -1,161 +1,337 @@
-# RAG Microservice v0.1
 
-A simple Retrieval-Augmented Generation (RAG) microservice built with FastAPI and Qdrant.
+# RAG Microservice v0.3
 
-## Features
+A production-ready Retrieval-Augmented Generation (RAG) microservice with comprehensive observability, async job processing, Server-Sent Events streaming, and advanced retrieval strategies.
 
-- **Document Ingestion**: Support for text, HTML, and Markdown content via `/ingest`
-- **Dense Search**: Vector similarity search using local embeddings
-- **Simple Query**: Question answering via `/query` endpoint
-- **Health Check**: Basic monitoring via `/health`
+## ✨ New in v0.3
 
-## Quick Start
+- **🔍 OpenTelemetry Tracing**: Distributed tracing with Jaeger UI
+- **📊 Langfuse Integration**: LLM call tracking and observability  
+- **📈 Comprehensive Metrics**: JSON endpoint with system monitoring
+- **📝 Structured Logging**: Correlation with trace IDs and span IDs
+- **🎯 Cross-Encoder Reranking**: Advanced relevance scoring
+- **⚡ Enhanced Performance**: Optimized with observability insights
 
-1. **Start the services:**
-   ```bash
-   make up
-   ```
+## 🏗️ Architecture
 
-2. **Ingest a document:**
-   ```bash
-   curl -X POST http://localhost:8000/ingest \
-     -H 'Content-Type: application/json' \
-     -d '{"content":"Your document content here","document_type":"text"}'
-   ```
-
-3. **Query the system:**
-   ```bash
-   curl -X POST http://localhost:8000/query \
-     -H 'Content-Type: application/json' \
-     -d '{"question":"What is this document about?"}'
-   ```
-
-## API Endpoints
-
-- `GET /` - Root endpoint with service info
-- `GET /health` - Health check
-- `POST /ingest` - Ingest documents
-- `POST /query` - Query documents
-- `GET /docs` - Interactive API documentation
-
-## Configuration
-
-Environment variables:
-- `QDRANT_URL` - Qdrant server URL (default: http://localhost:6333)
-- `COLLECTION_NAME` - Vector collection name (default: docs_v1)
-- `EMBEDDING_MODEL` - Sentence transformer model (default: BAAI/bge-m3)
-
-## Architecture
-
-```
-FastAPI ← HTTP → Client
-   ↓
-Qdrant (Vector DB)
-   ↓  
-Local Embeddings (sentence-transformers)
-```
 ![Stage 1](evo-stages/stage1.svg)
 
 ![Stage 2](evo-stages/stage2.png)
-## Development
 
-- **Stop services:** `make down`
-- **View logs:** `make logs`  
-- **Shell access:** `make shell`
-- **Clean up:** `make clean`
-
-
-## log
-
-![deploy](evo-stages/deployv1.png)
-![logstatus](evo-stages/logv1.png)
-![make](evo-stages/makev1.png)
-![test](evo-stages/testv1.png)
-
-## status
-- OK
-
-
-
-
-# RAG Microservice v0.2
-
-A Retrieval-Augmented Generation (RAG) microservice with async job processing, Server-Sent Events streaming, and multiple retrieval strategies.
-
-## ✨ New in v0.2
-
-- **Async Jobs**: Document ingestion runs asynchronously with job tracking
-- **Server-Sent Events**: Real-time progress streaming for ingest and query
-- **Multiple Retrievers**: Choose between dense, BM25, or hybrid search
-- **Progress Tracking**: Monitor ingestion progress in real-time
+# NEW
+![Stage 3](evo-stages/stage3.png)
 
 ## 🚀 Quick Start
 
-1. **Start the services:**
+1. **Configure environment:**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your API keys
+   ```
+
+2. **Start the full observability stack:**
    ```bash
    docker compose up --build
    ```
-2. **Ingest a document (async)**
- ```bash
-curl -X POST http://localhost:8000/ingest \
-  -H 'Content-Type: application/json' \
-  -d '{"content":"Your document content","document_type":"text"}'
-  ```
-3. **Monitor job progress:**  
-```bash
-curl http://localhost:8000/ingest/{job_id}/status
-curl -N http://localhost:8000/ingest/{job_id}/stream
+
+3. **Access services:**
+   - **API**: http://localhost:8000
+   - **Jaeger UI**: http://localhost:16686  
+   - **API Docs**: http://localhost:8000/docs
+   - **Metrics**: http://localhost:8000/metrics
+
+## 📊 Observability Features
+
+### **Distributed Tracing (Jaeger)**
+- End-to-end request tracing
+- Service dependency mapping
+- Performance bottleneck identification
+- Error root cause analysis
+
+### **LLM Observability (Langfuse)**
+```python
+# Automatic LLM call tracking
+with trace_with_langfuse("embedding_generation") as ctx:
+    embeddings = embed_texts(chunks)
 ```
-4. **Query with different retrievers:**
+
+### **Metrics Collection**
 ```bash
-# Dense retrieval (default)
+curl http://localhost:8000/metrics
+```
+```json
+{
+  "counters": {
+    "http_requests_total": {"GET /query": 150},
+    "ingest_jobs_completed": 45
+  },
+  "histograms": {
+    "http_request_duration_ms": {
+      "count": 150, "mean": 245.5, "p95": 890.2
+    }
+  },
+  "system": {
+    "cpu_percent": 15.2,
+    "memory_percent": 45.8
+  }
+}
+```
+
+### **Structured Logging**
+```json
+{
+  "timestamp": "2024-01-20T10:30:45Z",
+  "level": "INFO", 
+  "message": "Query processed successfully",
+  "trace_id": "abc123def456...",
+  "span_id": "789xyz...",
+  "extra": {
+    "retriever": "hybrid_rerank",
+    "sources_found": 5,
+    "query_duration_ms": 234
+  }
+}
+```
+
+## 🔍 Retrieval Strategies
+
+### **1. Dense Vector Search**
+```bash
 curl -X POST "http://localhost:8000/query?retriever=dense&top_k=5" \
   -H 'Content-Type: application/json' \
-  -d '{"question":"What is this about?"}'
+  -d '{"question":"What is machine learning?"}'
+```
 
-# BM25 keyword search
+### **2. BM25 Keyword Search** 
+```bash
 curl -X POST "http://localhost:8000/query?retriever=bm25&top_k=5" \
   -H 'Content-Type: application/json' \
-  -d '{"question":"What is this about?"}'
+  -d '{"question":"machine learning algorithms"}'
+```
 
-# Hybrid search
+### **3. Hybrid Search (Dense + BM25)**
+```bash
 curl -X POST "http://localhost:8000/query?retriever=hybrid&top_k=5" \
   -H 'Content-Type: application/json' \
-  -d '{"question":"What is this about?"}'
-```  
-4. **Stream query results:**
+  -d '{"question":"AI and machine learning"}'
+```
+
+### **4. Reranked Search (with Cross-Encoder)**
 ```bash
-curl -N "http://localhost:8000/query/stream?q=What is this about?&retriever=hybrid"
-````
-🔧 API Endpoints
-Ingestion
+# Enable reranking in .env: RERANK_ENABLED=true
+curl -X POST "http://localhost:8000/query?retriever=hybrid_rerank&top_k=5" \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"advanced AI techniques"}'
+```
 
-POST /ingest - Start async document ingestion
-POST /ingest/file - Upload and ingest file
-GET /ingest/{job_id}/status - Get job status
-GET /ingest/{job_id}/stream - Stream job progress (SSE)
+## 📡 Async Ingestion with Progress Tracking
 
-Query
+### **Start Ingestion Job**
+```bash
+RESPONSE=$(curl -X POST http://localhost:8000/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"https://example.com/document.html","document_type":"html"}')
 
-POST /query - Query documents
-GET /query/stream - Stream query results (SSE)
-GET /query/retrievers - List available retrievers
+JOB_ID=$(echo $RESPONSE | jq -r '.job_id')
+```
 
-Retrievers
+### **Monitor Progress (Polling)**
+```bash
+curl http://localhost:8000/ingest/$JOB_ID/status
+```
 
-dense: Semantic similarity using OpenAI embeddings
-bm25: Keyword-based search using BM25
-hybrid: Combines dense and BM25 with score fusion
+### **Stream Progress (SSE)**
+```bash
+curl -N http://localhost:8000/ingest/$JOB_ID/stream
+```
 
-Client
-  ↓ HTTP/SSE
-FastAPI Router
-  ↓
-Job Manager (in-memory)
-  ↓
-Retrieval Strategies
-  ├── Dense (OpenAI/Qdrant)
-  ├── BM25 (in-memory)
-  └── Hybrid (fusion)
-  ↓
-Vector Store (Qdrant) + BM25 Index
+### **JavaScript SSE Example**
+```javascript
+const eventSource = new EventSource(`/ingest/${jobId}/stream`);
+
+eventSource.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  console.log(`Job ${data.job_id}: ${data.stage} - ${data.progress}%`);
+  
+  if (data.status === 'success') {
+    console.log(`✅ Ingested ${data.chunks_created} chunks`);
+    eventSource.close();
+  }
+};
+```
+
+## 🌊 Query Streaming
+
+```bash
+# Stream query results in real-time
+curl -N "http://localhost:8000/query/stream?q=What is FastAPI?&retriever=hybrid_rerank&top_k=3"
+```
+
+```javascript
+const queryStream = new EventSource('/query/stream?q=FastAPI&retriever=hybrid');
+
+queryStream.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  
+  switch(data.type) {
+    case 'search_start':
+      console.log('🔍 Starting search...');
+      break;
+    case 'search_results': 
+      console.log(`📄 Found ${data.results_count} sources`);
+      break;
+    case 'generation_chunk':
+      document.getElementById('answer').innerHTML += data.chunk;
+      break;
+    case 'generation_complete':
+      console.log('✅ Answer complete');
+      break;
+  }
+};
+```
+
+## ⚙️ Configuration
+
+### **Environment Variables**
+```env
+# Vector Database
+QDRANT_URL=http://localhost:6333
+COLLECTION_NAME=docs_v3
+
+# Embeddings
+EMBEDDING_PROVIDER=openai  # or 'local'
+EMBEDDING_MODEL=text-embedding-3-small
+OPENAI_API_KEY=sk-your-key-here
+
+# OpenTelemetry Tracing
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+OTEL_SERVICE_NAME=rag-microservice-v3
+OTEL_SAMPLE_RATE=1.0
+
+# Langfuse (optional)
+LANGFUSE_PUBLIC_KEY=pk_your_key
+LANGFUSE_SECRET_KEY=sk_your_key
+LANGFUSE_HOST=https://cloud.langfuse.com
+
+# Reranking
+RERANK_ENABLED=true
+RERANK_MODEL=BAAI/bge-reranker-v2-m3
+
+# Logging
+LOG_STRUCTURED=true
+LOG_LEVEL=INFO
+```
+
+## 📈 Performance Monitoring
+
+### **Query Performance Dashboard**
+Access Jaeger UI at http://localhost:16686 to analyze:
+- Request latencies by retriever type
+- Embedding generation times
+- Database query performance
+- Error rates and patterns
+
+### **System Metrics**
+```bash
+# Get comprehensive metrics
+curl http://localhost:8000/metrics | jq .
+
+# Quick health check
+curl http://localhost:8000/metrics/health
+```
+
+### **Log Analysis**
+```bash
+# Filter logs by trace ID
+docker compose logs api | grep "abc123def456"
+
+# Monitor error patterns
+docker compose logs api | grep '"level":"ERROR"'
+```
+
+## 🧪 Testing & Development
+
+### **Health Checks**
+```bash
+# Application health
+curl http://localhost:8000/health
+
+# Metrics system health  
+curl http://localhost:8000/metrics/health
+
+# Service dependencies
+curl http://localhost:6333/collections  # Qdrant
+curl http://localhost:16686/api/traces  # Jaeger
+```
+
+### **Load Testing**
+```bash
+# Test ingestion performance
+for i in {1..10}; do
+  curl -X POST http://localhost:8000/ingest \
+    -H 'Content-Type: application/json' \
+    -d "{\"content\":\"Test document $i\",\"document_type\":\"text\"}" &
+done
+
+# Test query performance
+for i in {1..50}; do
+  curl -X POST "http://localhost:8000/query?retriever=hybrid" \
+    -H 'Content-Type: application/json' \
+    -d '{"question":"test query"}' &
+done
+```
+
+## 🔧 Troubleshooting
+
+### **Common Issues**
+
+**Tracing not appearing in Jaeger:**
+```bash
+# Check OTel Collector logs
+docker compose logs otel-collector
+
+# Verify endpoint configuration
+curl http://localhost:4318/v1/traces
+```
+
+**High memory usage:**
+```bash
+# Check metrics for memory patterns
+curl http://localhost:8000/metrics | jq .system.memory_percent
+
+# Adjust OTel batch settings in otel-collector-config.yaml
+```
+
+**Slow queries:**
+```bash
+# Analyze spans in Jaeger UI
+# Check retrieval strategy performance
+curl -X POST "http://localhost:8000/query?retriever=dense" \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"test"}' -w "%{time_total}"
+```
+
+## 🔜 Coming in v1.0
+
+- **Redis Job Backend**: Persistent, scalable job management
+- **Prometheus Metrics**: `/metrics/prometheus` endpoint
+- **Advanced Chunking**: Semantic and hierarchical splitting
+- **Health Monitoring**: `/ready` endpoint with dependency checks
+- **Auto-scaling**: Horizontal pod autoscaling based on metrics
+
+## 📚 API Reference
+
+Full interactive documentation available at http://localhost:8000/docs
+
+### **Key Endpoints**
+- `POST /ingest` - Start document ingestion
+- `GET /ingest/{job_id}/status` - Check job status  
+- `GET /ingest/{job_id}/stream` - Stream job progress
+- `POST /query` - Query documents
+- `GET /query/stream` - Stream query results
+- `GET /metrics` - Application metrics
+- `GET /health` - Service health check
+
+---
+
+**Built with ❤️ using FastAPI, OpenTelemetry, Qdrant, and modern observability practices.**

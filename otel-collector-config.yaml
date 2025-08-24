@@ -13,21 +13,24 @@ processors:
   
   memory_limiter:
     limit_mib: 256
+    check_interval: 1s  # ← AGREGAR ESTO
 
 exporters:
-  jaeger:
+  # OTLP to Jaeger
+  otlp/jaeger:
     endpoint: jaeger:14250
     tls:
       insecure: true
   
+  # Console logging
   logging:
-    loglevel: debug
+    loglevel: info
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [jaeger, logging]
-    
+      exporters: [otlp/jaeger, logging]
+  
   extensions: []
