@@ -138,9 +138,7 @@ def traced(
                         duration_ms,
                         {"function": func.__name__, "module": func.__module__}
                     )
-        
-        # Return appropriate wrapper based on function type
-        if inspect.iscoroutinefunction(func):  # ← CAMBIAR AQUÍ
+        if inspect.iscoroutinefunction(func):  
             return async_wrapper
         else:
             return sync_wrapper
@@ -171,7 +169,7 @@ def timed(metric_name: Optional[str] = None, labels: Optional[Dict[str, str]] = 
                 duration_ms = (time.time() - start_time) * 1000
                 record_duration(name, duration_ms, labels)
         
-        return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper  # ← CAMBIAR AQUÍ
+        return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper  
     
     return decorator
 
@@ -201,6 +199,6 @@ def monitor_errors(metric_name: str = "function_errors_total"):
                 })
                 raise
         
-        return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper  # ← CAMBIAR AQUÍ
+        return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper  
     
     return decorator

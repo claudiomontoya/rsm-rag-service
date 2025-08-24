@@ -3,7 +3,7 @@ import os
 
 # Qdrant Configuration
 QDRANT_URL: str = os.getenv("QDRANT_URL", "http://localhost:6333")
-COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "docs_v1")
+COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "docs_m3")
 
 # Embeddings Configuration
 EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "local").lower()

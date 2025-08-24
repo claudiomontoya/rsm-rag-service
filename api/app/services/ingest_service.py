@@ -261,8 +261,7 @@ async def run_ingest_job(job_id: str, content: str, document_type: str) -> None:
                     "duration_seconds": job_duration
                 })
 
-# CAMBIAR start_ingest_job para que retorne job_id:
-# app/services/ingest_service.py
+
 @traced(operation_name="start_ingest_job")
 async def start_ingest_job(content: str, document_type: str) -> str:
     job = await redis_job_registry.create_job(timeout_seconds=600, max_retries=2)
